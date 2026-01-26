@@ -6,6 +6,7 @@ yarn-error.log*
 
 # Settings with sensitive data
 .pi/settings.json
+.pi/
 
 # IDE
 .vscode/
