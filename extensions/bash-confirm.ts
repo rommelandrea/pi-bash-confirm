@@ -1,11 +1,23 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Box, Container, Text, SelectList, type SelectItem } from "@mariozechner/pi-tui";
+import { Box, Container, Text, type SelectItem } from "@mariozechner/pi-tui";
 import https from "node:https";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 type JsonObject = Record<string, unknown>;
+
+type WhitelistEntry = {
+  command: string;
+  addedAt: string;
+  note?: string;
+};
+
+type WhitelistData = {
+  entries: WhitelistEntry[];
+  version: number;
+};
 
 type TelegramResponse<T> =
   | { ok: true; result: T }
@@ -102,6 +114,85 @@ function formatNetworkError(error: unknown): string {
   const anyErr = error as any;
   const code = anyErr.code || anyErr.cause?.code;
   return code ? `${error.message} (${String(code)})` : error.message;
+}
+
+function loadWhitelist(cwd: string): WhitelistData {
+  const whitelistPath = join(cwd, ".pi", "bash-confirm-whitelist.json");
+
+  if (!existsSync(whitelistPath)) {
+    return { entries: [], version: 1 };
+  }
+
+  try {
+    const data = JSON.parse(readFileSync(whitelistPath, "utf-8")) as unknown;
+    if (isPlainObject(data)) {
+      const obj = data as Record<string, unknown>;
+      const entries = Array.isArray(obj.entries) ? (obj.entries as WhitelistEntry[]) : [];
+      const version = typeof obj.version === "number" ? obj.version : 1;
+      return { entries, version };
+    }
+  } catch (error: unknown) {
+    // Ignore errors and return default
+  }
+
+  return { entries: [], version: 1 };
+}
+
+function saveWhitelist(cwd: string, whitelist: WhitelistData): void {
+  const dir = join(cwd, ".pi");
+  if (!existsSync(dir)) {
+    try {
+      mkdirSync(dir, { recursive: true });
+    } catch {
+      return; // Failed to create directory
+    }
+  }
+
+  try {
+    writeFileSync(
+      join(cwd, ".pi", "bash-confirm-whitelist.json"),
+      JSON.stringify(whitelist, null, 2),
+      "utf-8",
+    );
+  } catch (error: unknown) {
+    // Silent fail - can't write whitelist file
+  }
+}
+
+function addToWhitelist(cwd: string, command: string, note?: string): void {
+  const whitelist = loadWhitelist(cwd);
+
+  // Check if already whitelisted
+  if (whitelist.entries.some(entry => entry.command === command)) {
+    return;
+  }
+
+  whitelist.entries.push({
+    command,
+    addedAt: new Date().toISOString(),
+    note,
+  });
+
+  saveWhitelist(cwd, whitelist);
+}
+
+function removeFromWhitelist(cwd: string, command: string): boolean {
+  const whitelist = loadWhitelist(cwd);
+  const index = whitelist.entries.findIndex(entry => entry.command === command);
+
+  if (index === -1) {
+    return false;
+  }
+
+  whitelist.entries.splice(index, 1);
+  saveWhitelist(cwd, whitelist);
+  return true;
+}
+
+function formatWhitelistEntry(entry: WhitelistEntry, index: number): string {
+  const date = new Date(entry.addedAt).toLocaleString();
+  const note = entry.note ? ` (${entry.note})` : "";
+  return `${index + 1}. ${escapeHtml(entry.command)} ${escapeHtml(note)}\n   Added: ${date}`;
 }
 
 async function telegramCall<T>(options: {
@@ -423,61 +514,86 @@ export default function (pi: ExtensionAPI) {
     await sendShownNotification(ctx, command, pi);
 
     // Show confirmation dialog
-    const items: SelectItem[] = [
-      { value: "allow", label: "Allow", description: "Execute the command as-is" },
-      { value: "edit", label: "Edit", description: "Modify the command before execution" },
-      { value: "block", label: "Block", description: "Cancel this command" },
-    ];
-
     const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-      const container = new Container();
+      let selectedIndex = 0;
+      const options = [
+        { value: "allow", label: "Allow", description: "Execute the command as-is" },
+        { value: "always-accept", label: "Always Accept", description: "Add to whitelist and execute" },
+        { value: "edit", label: "Edit", description: "Modify the command before execution" },
+        { value: "block", label: "Block", description: "Cancel this command" },
+      ];
 
-      // Header
-      container.addChild(new Text(
-        theme.fg("warning", theme.bold("⚠️  Bash Command Confirmation")),
-        1, 1
-      ));
+      function handleInput(data: string) {
+        if (data === "\u001B[B" || data === "\u0019") { // Down arrow or Ctrl+N
+          selectedIndex = Math.min(selectedIndex + 1, options.length - 1);
+          tui.requestRender();
+          return;
+        }
+        if (data === "\u001B[A" || data === "\u0018") { // Up arrow or Ctrl+P
+          selectedIndex = Math.max(selectedIndex - 1, 0);
+          tui.requestRender();
+          return;
+        }
+        if (data === "\r" || data === "\n") { // Enter
+          done(options[selectedIndex].value);
+          return;
+        }
+        if (data === "\u001B") { // Escape
+          done("block");
+        }
+      }
 
-      // Command display box
-      container.addChild(new Box(1, 1, (s) => theme.bg("toolPendingBg", s)));
-      container.addChild(new Text(
-        theme.fg("text", `Command: ${command}`),
-        0, 0
-      ));
-      container.addChild(new Text(""));
+      function render(width: number): string[] {
+        const lines: string[] = [];
 
-      // Working directory
-      container.addChild(new Text(
-        theme.fg("muted", `Working directory: ${ctx.cwd}`),
-        1, 0
-      ));
+        // Header
+        lines.push(theme.fg("warning", theme.bold("⚠️  Bash Command Confirmation")));
 
-      // Selection list
-      const selectList = new SelectList(items, 3, {
-        selectedPrefix: (t) => theme.fg("accent", t),
-        selectedText: (t) => theme.fg("accent", t),
-        description: (t) => theme.fg("dim", t),
-      });
-      selectList.onSelect = (item) => done(item.value);
-      selectList.onCancel = () => done("block");
-      container.addChild(selectList);
+        // Command display box
+        lines.push("");
+        const cmdLine = `Command: ${command}`;
+        lines.push(cmdLine);
+        lines.push("");
 
-      // Help text
-      container.addChild(new Text(
-        theme.fg("dim", "↑↓ navigate • enter select • esc cancel"),
-        1, 0
-      ));
+        // Working directory
+        lines.push(`Working directory: ${ctx.cwd}`);
+
+        // Options
+        lines.push("");
+        for (let i = 0; i < options.length; i++) {
+          const opt = options[i];
+          const isSelected = i === selectedIndex;
+          const prefix = isSelected ? "> " : "  ";
+          const label = isSelected ? theme.fg("accent", opt.label) : theme.fg("text", opt.label);
+          lines.push(`${prefix}${label}`);
+
+          if (opt.description) {
+            lines.push(`    ${theme.fg("muted", opt.description)}`);
+          }
+        }
+
+        // Help text
+        lines.push("");
+        lines.push(theme.fg("dim", "↑↓ navigate • enter select • esc cancel"));
+
+        return lines;
+      }
 
       return {
-        render: (w) => container.render(w),
-        invalidate: () => container.invalidate(),
-        handleInput: (data) => { selectList.handleInput(data); tui.requestRender(); },
+        render,
+        invalidate: () => {},
+        handleInput,
       };
-    }, { overlay: true, overlayOptions: { anchor: "center", width: 60, minHeight: 10 } });
+    }, { overlay: true, overlayOptions: { anchor: "center", width: 70, minHeight: 12 } });
 
     // Handle user choice
     switch (result) {
       case "allow":
+        return undefined; // Execute normally
+      case "always-accept":
+        // Add to whitelist
+        addToWhitelist(ctx.cwd, command, "Always accept");
+        ctx.ui.notify("Added to whitelist: " + command, "success");
         return undefined; // Execute normally
       case "block":
         const blockReason = "Blocked by user";
@@ -561,11 +677,87 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /bash-confirm test-notify | debug", "info");
+      // Whitelist commands
+      const wlCmd = cmd.startsWith("whitelist ") ? cmd.slice("whitelist ".length).trim() : cmd;
+      if (wlCmd) {
+        const wlArgs = cmd.slice("whitelist ".length).trim();
+
+        // List whitelist
+        if (wlCmd === "list" || wlCmd === "ls") {
+          const whitelist = loadWhitelist(ctx.cwd);
+          ctx.ui.notify(`Whitelist (${whitelist.entries.length} entries):`, "info");
+          if (whitelist.entries.length === 0) {
+            ctx.ui.notify("  (empty)", "info");
+          } else {
+            whitelist.entries.forEach((entry, i) => {
+              ctx.ui.notify(formatWhitelistEntry(entry, i), "info");
+            });
+          }
+          return;
+        }
+
+        // Add to whitelist
+        if (wlCmd === "add" || wlCmd === "a") {
+          const spaceIndex = wlArgs.indexOf(" ");
+          let command = wlArgs;
+          let note: string | undefined;
+          if (spaceIndex > 0) {
+            command = wlArgs.slice(0, spaceIndex);
+            note = wlArgs.slice(spaceIndex + 1).trim() || undefined;
+          }
+          if (!command) {
+            ctx.ui.notify("Usage: /bash-confirm whitelist add <command> [note]", "warning");
+            return;
+          }
+          addToWhitelist(ctx.cwd, command, note);
+          ctx.ui.notify(`Added to whitelist: ${command}`, "success");
+          return;
+        }
+
+        // Remove from whitelist
+        if (wlCmd === "remove" || wlCmd === "rm" || wlCmd === "delete" || wlCmd === "del") {
+          if (!wlArgs) {
+            ctx.ui.notify("Usage: /bash-confirm whitelist remove <command>", "warning");
+            return;
+          }
+          const removed = removeFromWhitelist(ctx.cwd, wlArgs);
+          if (removed) {
+            ctx.ui.notify(`Removed from whitelist: ${wlArgs}`, "success");
+          } else {
+            ctx.ui.notify(`Command not in whitelist: ${wlArgs}`, "warning");
+          }
+          return;
+        }
+
+        // Clear whitelist
+        if (wlCmd === "clear" || wlCmd === "delete-all") {
+          const whitelist = loadWhitelist(ctx.cwd);
+          if (whitelist.entries.length === 0) {
+            ctx.ui.notify("Whitelist is already empty", "info");
+            return;
+          }
+          whitelist.entries = [];
+          saveWhitelist(ctx.cwd, whitelist);
+          ctx.ui.notify("Cleared whitelist", "success");
+          return;
+        }
+
+        // Show whitelist file location
+        if (wlCmd === "path" || wlCmd === "where" || wlCmd === "file") {
+          ctx.ui.notify(`Whitelist file: ${join(ctx.cwd, ".pi", "bash-confirm-whitelist.json")}`, "info");
+          return;
+        }
+
+        ctx.ui.notify("Usage: /bash-confirm whitelist [list|add|remove|clear|path]", "info");
+        return;
+      }
+
+      ctx.ui.notify("Usage: /bash-confirm [test-notify|debug|whitelist ...]", "info");
     },
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    ctx.ui.notify("Bash confirmation extension loaded (/bash-confirm)", "info");
+    const whitelist = loadWhitelist(ctx.cwd);
+    ctx.ui.notify(`Bash confirmation extension loaded (/bash-confirm) - ${whitelist.entries.length} whitelisted command${whitelist.entries.length !== 1 ? "s" : ""}`, "info");
   });
 }

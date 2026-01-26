@@ -303,7 +303,27 @@ Settings values take precedence over environment variables.
 3. Add LICENSE (MIT)
 4. Prepare for npm publish
 
-### Phase 6: Testing
+### Phase 6: Whitelist "Always Accept" Feature
+1. Add "Always Accept" option to confirmation dialog
+2. When selected, add the command to project-level whitelist
+3. Whitelist stored in `.pi/bash-confirm-whitelist.json` in project directory
+4. Whitelist supports exact command matches (not patterns)
+5. Auto-approve commands that match whitelist without showing dialog
+6. Add `/bash-confirm whitelist` commands:
+   - `/bash-confirm whitelist list` - Show all whitelisted commands
+   - `/bash-confirm whitelist add <command>` - Manually add a command
+   - `/bash-confirm whitelist remove <command>` - Remove a command
+   - `/bash-confirm whitelist clear` - Clear all whitelisted commands
+7. Whitelist entries include:
+   - Exact command string
+   - Timestamp when added
+   - Optional notes/description
+8. Whitelist is project-scoped only (no global whitelist for security)
+9. Whitelist management with auto-cleanup:
+   - Option to remove stale entries based on age
+   - Option to limit number of whitelisted commands
+
+### Phase 7: Testing
 1. Test various command types:
    - Simple: `ls -la`
    - Complex: `git commit -m "message"`
@@ -322,6 +342,16 @@ Settings values take precedence over environment variables.
    - Test with long commands (truncation)
    - Test notification rate limiting (if implemented)
    - Verify settings hierarchy (global → project → env vars → defaults)
+7. Test whitelist functionality:
+   - Test "Always Accept" option adds to whitelist
+   - Test whitelisted commands bypass confirmation dialog
+   - Test `/bash-confirm whitelist list` shows all entries
+   - Test `/bash-confirm whitelist add` adds commands
+   - Test `/bash-confirm whitelist remove` removes commands
+   - Test `/bash-confirm whitelist clear` clears all entries
+   - Test whitelist persistence across sessions
+   - Test whitelist is project-scoped (doesn't affect other projects)
+   - Test exact matching (whitelist doesn't use patterns)
 
 ## Code Sketch
 
