@@ -53,6 +53,7 @@ Send notifications when commands are blocked or modified, similar to `/home/matt
   "bashConfirm": {
     "notifications": {
       "enabled": true,
+      "onShown": false,
       "onBlocked": true,
       "onModified": true,
       "onAllowed": false,
@@ -91,7 +92,7 @@ Check if command matches "safe" pattern → allow without confirmation
   ↓
 Check if command matches "blocked" pattern → block with message + send notification
   ↓
-Show confirmation dialog
+Show confirmation dialog + send notification (if enabled)
   ↓
 User response:
   - Allow → return undefined (tool executes normally)
@@ -161,6 +162,7 @@ Implementation: Return `{ block: true, reason: "Confirmation required (no UI ava
     ],
     "notifications": {
       "enabled": true,
+      "onShown": false,
       "onBlocked": true,
       "onModified": true,
       "onAllowed": false,
@@ -185,15 +187,29 @@ The notification system will be modeled after `/home/matteo/.pi/agent/extensions
 - `telegramCall()` - Make HTTP requests to Telegram Bot API
 - `escapeHtml()` - Escape HTML for Telegram messages
 - `truncateText()` - Truncate messages to Telegram's 4096 character limit
+- `buildShownMessage()` - Build notification when dialog is displayed
 - `buildBlockedMessage()` - Build notification for blocked commands
 - `buildModifiedMessage()` - Build notification for modified commands
 
 **Notification Types:**
-1. **Blocked Command** - Sent when user blocks a command or pattern match blocks it
-2. **Modified Command** - Sent when user edits a command via the Edit option
-3. **Allowed Command** - Optional notification for allowed commands (disabled by default)
+1. **Dialog Shown** - Sent when confirmation dialog is displayed (disabled by default for noise reduction)
+2. **Blocked Command** - Sent when user blocks a command or pattern match blocks it
+3. **Modified Command** - Sent when user edits a command via the Edit option
+4. **Allowed Command** - Optional notification for allowed commands (disabled by default)
 
 **Message Format:**
+
+**Dialog Shown:**
+```
+⏳ Command Confirmation Requested
+
+Command: ls -la /home/user/project
+Working directory: /home/user/project
+Session: abc12345
+Timestamp: 2026-01-26T16:51:49Z
+```
+
+**Command Blocked:**
 ```
 ⚠️ Command Blocked
 
@@ -262,6 +278,7 @@ Settings values take precedence over environment variables.
 1. Extract notification utilities from `notification.ts` reference
 2. Implement Telegram Bot API client
 3. Create message builders for different notification types:
+   - Dialog shown (when confirmation dialog is displayed)
    - Blocked commands
    - Modified commands
    - (Optional) Allowed commands
@@ -269,6 +286,7 @@ Settings values take precedence over environment variables.
 5. Integrate notifications into the confirmation flow
 6. Add test command (`/bash-confirm test-notify`) to verify setup
 7. Test various notification scenarios:
+   - Dialog shown notifications
    - Pattern-based blocks
    - User blocks
    - User edits
@@ -297,6 +315,7 @@ Settings values take precedence over environment variables.
 5. Test with concurrent commands
 6. Test notification system:
    - Test Telegram connection with `/bash-confirm test-notify`
+   - Verify dialog shown notifications (when onShown is enabled)
    - Verify blocked command notifications
    - Verify modified command notifications
    - Test notification failures (invalid token, no network)
@@ -413,6 +432,24 @@ async function telegramCall<T>(options: {
   });
 }
 
+function buildShownMessage(
+  ctx: any,
+  command: string,
+  settings: JsonObject
+): string {
+  const sessionId = ctx.sessionManager.getSessionId()?.slice(0, 8) || "";
+  const lines: string[] = [];
+  lines.push("<b>⏳ Command Confirmation Requested</b>");
+  if (sessionId) lines.push(`Session: <code>${escapeHtml(sessionId)}</code>`);
+  lines.push(`Directory: <code>${escapeHtml(ctx.cwd)}</code>`);
+  lines.push("");
+  lines.push("<b>Command</b>");
+  lines.push(`<code>${escapeHtml(truncateText(command, 1000))}</code>`);
+  lines.push("");
+  lines.push(`<i>${new Date().toISOString()}</i>`);
+  return truncateText(lines.join("\n"), 3900);
+}
+
 function buildBlockedMessage(
   ctx: any,
   command: string,
@@ -457,6 +494,45 @@ function buildModifiedMessage(
   return truncateText(lines.join("\n"), 3900);
 }
 
+async function sendShownNotification(
+  ctx: any,
+  command: string
+) {
+  const settings = loadMergedSettings(ctx.cwd);
+  const notifyEnabled = getSetting(settings, "bashConfirm.notifications.enabled", false);
+  if (!notifyEnabled) return;
+
+  const onShown = getSetting(settings, "bashConfirm.notifications.onShown", false);
+  if (!onShown) return;
+
+  const telegramEnabled = getSetting(settings, "bashConfirm.notifications.telegram.enabled", false);
+  if (!telegramEnabled) return;
+
+  const token = getSetting(settings, "bashConfirm.notifications.telegram.token", "") ||
+               process.env.TELEGRAM_BOT_TOKEN ||
+               process.env.PI_TELEGRAM_TOKEN;
+  const chatId = getSetting(settings, "bashConfirm.notifications.telegram.chatId", "") ||
+                  process.env.TELEGRAM_CHAT_ID ||
+                  process.env.PI_TELEGRAM_CHAT_ID;
+  const timeoutMs = getSetting(settings, "bashConfirm.notifications.telegram.timeoutMs", 5000);
+
+  if (!token || !chatId) return;
+
+  const htmlMessage = buildShownMessage(ctx, command, settings);
+
+  await telegramCall({
+    token,
+    method: "sendMessage",
+    body: {
+      chat_id: chatId,
+      text: htmlMessage,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    },
+    timeoutMs,
+  });
+}
+
 async function sendBlockedNotification(
   ctx: any,
   command: string,
@@ -483,7 +559,6 @@ async function sendBlockedNotification(
   if (!token || !chatId) return;
 
   const htmlMessage = buildBlockedMessage(ctx, command, reason, settings);
-  const plainMessage = htmlMessage.replace(/<[^>]+>/g, "");
 
   await telegramCall({
     token,
@@ -572,6 +647,9 @@ export default function (pi: ExtensionAPI) {
       await sendBlockedNotification(ctx, command, reason);
       return { block: true, reason };
     }
+
+    // Send notification that dialog is being shown
+    await sendShownNotification(ctx, command);
 
     // Show confirmation dialog
     const items: SelectItem[] = [
@@ -809,6 +887,19 @@ function formatToTelegramHtml(markdown: string): string
 ```
 
 #### 4. Notification Types
+
+**Dialog Shown Message:**
+```
+⏳ Command Confirmation Requested
+
+Session: abc12345
+Directory: /home/user/project
+
+Command
+ls -la /home/user/project
+
+2026-01-26T16:51:49.123Z
+```
 
 **Blocked Command Message:**
 ```
