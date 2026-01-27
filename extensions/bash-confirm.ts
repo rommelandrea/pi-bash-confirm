@@ -540,6 +540,15 @@ export default function (pi: ExtensionAPI) {
           tui.requestRender();
           return;
         }
+        if (/^[1-9]$/.test(data)) {
+          const numericIndex = Number(data) - 1;
+          if (numericIndex >= 0 && numericIndex < options.length) {
+            selectedIndex = numericIndex;
+            tui.requestRender();
+            done(options[selectedIndex].value);
+          }
+          return;
+        }
         if (data === "\r" || data === "\n") { // Enter
           done(options[selectedIndex].value);
           return;
@@ -570,7 +579,8 @@ export default function (pi: ExtensionAPI) {
           const opt = options[i];
           const isSelected = i === selectedIndex;
           const prefix = isSelected ? "> " : "  ";
-          const label = isSelected ? theme.fg("accent", opt.label) : theme.fg("text", opt.label);
+          const numberedLabel = `${i + 1}. ${opt.label}`;
+          const label = isSelected ? theme.fg("accent", numberedLabel) : theme.fg("text", numberedLabel);
           lines.push(`${prefix}${label}`);
 
           if (opt.description) {
@@ -580,7 +590,7 @@ export default function (pi: ExtensionAPI) {
 
         // Help text
         lines.push("");
-        lines.push(theme.fg("dim", "↑↓ navigate • enter select • esc cancel"));
+        lines.push(theme.fg("dim", "↑↓ navigate • enter select • 1-4 quick pick • esc cancel"));
 
         return lines;
       }
