@@ -90,6 +90,16 @@ Test your Telegram notification setup:
 
 ### Debug Configuration
 
+To show in-TUI debug notifications explaining why commands were allowed/blocked, enable:
+
+```json
+{
+  "bashConfirm": {
+    "debug": true
+  }
+}
+```
+
 View your current configuration:
 
 ```
@@ -103,6 +113,7 @@ View your current configuration:
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `enabled` | boolean | `true` | Enable/disable the extension |
+| `debug` | boolean | `false` | Show debug notifications explaining why a command was allowed/blocked |
 | `safeCommands` | string[] | `[]` | Regex patterns for auto-allowed commands |
 | `blockedCommands` | string[] | `[]` | Regex patterns for always-blocked commands |
 

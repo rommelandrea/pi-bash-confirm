@@ -91,6 +91,12 @@ function getSetting<T>(settings: JsonObject, path: string, fallback: T): T {
   return (current as T) ?? fallback;
 }
 
+function debugNotify(ctx: ExtensionContext, settings: JsonObject, message: string): void {
+  const debugEnabled = getSetting(settings, "bashConfirm.debug", false);
+  if (!debugEnabled) return;
+  ctx.ui.notify(`[bash-confirm debug] ${message}`, "info");
+}
+
 function maskToken(token: string): string {
   if (!token) return "(missing)";
   if (token.length <= 10) return "(present)";
@@ -498,34 +504,42 @@ export default function (pi: ExtensionAPI) {
       blockedCommands?: string[];
     };
 
-    if (!config.enabled) return undefined;
+    if (!config.enabled) {
+      debugNotify(ctx, settings, "Extension disabled (bashConfirm.enabled = false)");
+      return undefined;
+    }
 
     const command = event.input.command as string;
 
     // Check blocked commands
     if (config.blockedCommands?.some(pattern => new RegExp(pattern).test(command))) {
       const reason = "Command matches blocked pattern";
+      debugNotify(ctx, settings, `Blocked: ${reason}`);
       return await blockAndStop(ctx, command, reason, pi);
     }
 
     // Check whitelist (always allow)
     const whitelist = loadWhitelist(ctx.cwd);
     if (whitelist.entries.some(entry => entry.command === command)) {
+      debugNotify(ctx, settings, "Allowed: command is in whitelist");
       return undefined;
     }
 
     // Check safe commands
     if (config.safeCommands?.some(pattern => new RegExp(pattern).test(command))) {
+      debugNotify(ctx, settings, "Allowed: command matches safeCommands pattern");
       return undefined; // Allow without confirmation
     }
 
     // No UI available - block for safety
     if (!ctx.hasUI) {
       const reason = "Confirmation required (no UI available)";
+      debugNotify(ctx, settings, `Blocked: ${reason}`);
       return await blockAndStop(ctx, command, reason, pi);
     }
 
     // Send notification that dialog is being shown
+    debugNotify(ctx, settings, "Showing confirmation dialog");
     await sendShownNotification(ctx, command, pi);
 
     // Show confirmation dialog
@@ -613,23 +627,28 @@ export default function (pi: ExtensionAPI) {
         invalidate: () => {},
         handleInput,
       };
-    }, { overlay: true, overlayOptions: { anchor: "center", width: "100%", maxHeight: "90%", margin: 1 } });
+    }, { overlay: true, overlayOptions: { anchor: "bottom-center", width: "100%", maxHeight: "90%", margin: 1 } });
 
     // Handle user choice
     switch (result) {
       case "allow":
+        debugNotify(ctx, settings, "User allowed command");
         return undefined; // Execute normally
       case "always-accept":
+        debugNotify(ctx, settings, "User allowed and whitelisted command");
         // Add to whitelist
         addToWhitelist(ctx.cwd, command, "Always accept");
         ctx.ui.notify("Added to whitelist: " + command, "success");
         return undefined; // Execute normally
       case "block":
+        debugNotify(ctx, settings, "User blocked command");
         return await blockAndStop(ctx, command, "Blocked by user", pi);
       case "edit":
+        debugNotify(ctx, settings, "User chose to edit command");
         // Open editor for modification
         const edited = await ctx.ui.editor("Edit command:", command);
         if (!edited) {
+          debugNotify(ctx, settings, "User cancelled edit");
           return await blockAndStop(ctx, command, "Edit cancelled", pi);
         }
         await sendModifiedNotification(ctx, command, edited, pi);
@@ -637,6 +656,7 @@ export default function (pi: ExtensionAPI) {
         event.input.command = edited;
         return undefined;
       default:
+        debugNotify(ctx, settings, "No selection - blocking");
         return await blockAndStop(ctx, command, "No selection", pi);
     }
   });
@@ -657,6 +677,7 @@ export default function (pi: ExtensionAPI) {
 
       if (cmd === "debug") {
         const enabled = getSetting(settings, "bashConfirm.enabled", true);
+        const debugEnabled = getSetting(settings, "bashConfirm.debug", false);
         const notifyEnabled = getSetting(settings, "bashConfirm.notifications.enabled", false);
         const onShown = getSetting(settings, "bashConfirm.notifications.onShown", false);
         const onBlocked = getSetting(settings, "bashConfirm.notifications.onBlocked", false);
@@ -668,7 +689,7 @@ export default function (pi: ExtensionAPI) {
         const safeCommands = getSetting(settings, "bashConfirm.safeCommands", []) as string[];
         const blockedCommands = getSetting(settings, "bashConfirm.blockedCommands", []) as string[];
 
-        ctx.ui.notify(`bash-confirm: enabled=${enabled}`, "info");
+        ctx.ui.notify(`bash-confirm: enabled=${enabled}, debug=${debugEnabled}`, "info");
         ctx.ui.notify(`notifications: enabled=${notifyEnabled}, onShown=${onShown}, onBlocked=${onBlocked}, onModified=${onModified}`, "info");
         ctx.ui.notify(`telegram: token=${maskToken(token)}, chatId=${chatId || "(missing)"}, timeoutMs=${timeoutMs}, forceIpv4=${forceIpv4}`, "info");
         ctx.ui.notify(`safeCommands: [${safeCommands.join(", ") || "(none)"}]`, "info");
