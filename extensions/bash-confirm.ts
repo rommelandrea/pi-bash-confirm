@@ -489,7 +489,7 @@ async function blockAndStop(
   pi: ExtensionAPI
 ): Promise<{ block: true; reason: string }> {
   await sendBlockedNotification(ctx, command, reason, pi);
-  ctx.shutdown();
+  ctx.abort();
   return { block: true, reason };
 }
 
