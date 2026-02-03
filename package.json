@@ -1,6 +1,6 @@
 {
   "name": "pi-bash-confirm",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Pi package for confirming bash commands before execution with Telegram notifications",
   "type": "module",
   "keywords": [
@@ -13,7 +13,9 @@
   ],
   "main": "./extensions/bash-confirm.ts",
   "pi": {
-    "extensions": ["./extensions/bash-confirm.ts"]
+    "extensions": [
+      "./extensions/bash-confirm.ts"
+    ]
   },
   "files": [
     "extensions/",
