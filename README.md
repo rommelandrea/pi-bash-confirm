@@ -30,10 +30,7 @@ Create or edit `~/.pi/agent/settings.json` (global) or `.pi/settings.json` (proj
   "bashConfirm": {
     "enabled": true,
     "safeCommands": [
-      "^ls",
-      "^pwd",
-      "^git (status|log|diff)",
-      "^cat .+\\.md$"
+      "^ls"
     ],
     "blockedCommands": [
       "rm -rf",
@@ -190,12 +187,75 @@ Configure safe commands to bypass confirmation:
 ```json
 {
   "bashConfirm": {
+    "enabled": true,
+    "debug": false,
     "safeCommands": [
-      "^ls",                    # Simple ls
-      "^ls -",                  # ls with any flags
-      "^pwd$",                  # Exact pwd match
-      "^git (status|log)",      # git status or git log
-      "^cat .+\\.(md|txt|json)$" # cat files with extensions
+      "^ls",
+      "^pwd",
+      "^cd",
+      "^rg",
+      "^grep",
+      "^find(?!.*-(exec|ok|delete|execdir))",
+      "^cat",
+      "^echo",
+      "^head",
+      "^tail",
+      "^wc",
+      "^sort",
+      "^uniq",
+      "^cut",
+      "^tr",
+      "^awk",
+      "^file",
+      "^stat",
+      "^diff",
+      "^cmp",
+      "^basename",
+      "^dirname",
+      "^realpath",
+      "^readlink",
+      "^which",
+      "^whereis",
+      "^whatis",
+      "^type",
+      "^id",
+      "^whoami",
+      "^who",
+      "^uname",
+      "^hostname",
+      "^date",
+      "^cal",
+      "^env",
+      "^printenv",
+      "^ps",
+      "^pgrep",
+      "^top",
+      "^htop",
+      "^df",
+      "^du",
+      "^free",
+      "^uptime",
+      "^lscpu",
+      "^lsmem",
+      "^lsusb",
+      "^lspci",
+      "^lsblk",
+      "^mount$",
+      "^ifconfig",
+      "^ip addr",
+      "^ip link",
+      "^ip route",
+      "^netstat",
+      "^ss",
+      "^ping",
+      "^curl(?!.*-[Oo])",
+      "^git (status|log|diff|show|branch|remote|config|stash list)",
+      "^cat .+\\.md$",
+      "^gh issue view .*$",
+      "^gh pr view .*$",
+      "^gh pr diff .*$",
+      "^gh run .*$",
+      "^gh repo view .*$"
     ]
   }
 }
