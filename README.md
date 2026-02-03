@@ -226,7 +226,6 @@ Configure safe commands to bypass confirmation:
       "^date",
       "^cal",
       "^env",
-      "^printenv",
       "^ps",
       "^pgrep",
       "^top",
