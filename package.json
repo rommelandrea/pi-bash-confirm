@@ -22,16 +22,16 @@
     "README.md",
     "LICENSE"
   ],
-  "author": "",
+  "author": "Matteo Collina <hello@matteocollina.com>",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/pi-bash-confirm.git"
+    "url": "https://github.com/mcollina/pi-bash-confirm.git"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/pi-bash-confirm/issues"
+    "url": "https://github.com/mcollina/pi-bash-confirm/issues"
   },
-  "homepage": "https://github.com/yourusername/pi-bash-confirm#readme",
+  "homepage": "https://github.com/mcollina/pi-bash-confirm#readme",
   "engines": {
     "node": ">=20.0.0"
   },
