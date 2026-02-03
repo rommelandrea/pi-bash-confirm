@@ -4,8 +4,9 @@ A [pi](https://github.com/mariozechner/pi) package that adds a confirmation dial
 
 ## Features
 
-- **Confirmation Dialog**: Interactively approve, edit, or block bash commands before execution
+- **Confirmation Dialog**: Interactively approve, edit, always accept (whitelist), or block bash commands before execution
 - **Command Patterns**: Configure safe commands (auto-allow) and blocked commands (auto-block) using regex
+- **Per-Project Whitelist**: Commands added to whitelist via "Always Accept" option won't prompt again in that project
 - **Edit Mode**: Modify commands before approval using pi's built-in editor
 - **Telegram Notifications**: Get notified when commands are blocked or modified
 - **Non-Interactive Safety**: Blocks commands when UI is unavailable unless they match safe patterns
@@ -303,25 +304,82 @@ Create `.pi/settings.json` in your project directory:
 When a bash command is intercepted, you'll see:
 
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│ ⚠️  Bash Command Confirmation                                      │
-│ ┌──────────────────────────────────────────────────────────────────┐ │
-│ │Command: git push origin main                                    │ │
-│ └──────────────────────────────────────────────────────────────────┘ │
-│ Working directory: /home/user/project                              │
-│                                                                     │
-│ ● Allow   Execute the command as-is                                 │
-│   Edit    Modify the command before execution                       │
-│   Block   Cancel this command                                       │
-│                                                                     │
-│ ↑↓ navigate • enter select • esc cancel                             │
-└────────────────────────────────────────────────────────────────────┘
+⚠️  Bash Command Confirmation
+
+Command:
+  git push origin main
+
+Working directory: /home/user/project
+
+> 1. Allow
+    Execute the command as-is
+  2. Always Accept
+    Add to whitelist and execute
+  3. Edit
+    Modify the command before execution
+  4. Block
+    Cancel this command
+
+↑↓ navigate • enter select • 1-4 quick pick • esc cancel
 ```
 
 **Options:**
-- **Allow**: Execute the command as-is
-- **Edit**: Open editor to modify the command before approval
-- **Block** (or ESC): Cancel the command execution
+- **Allow** (1): Execute the command as-is
+- **Always Accept** (2): Add the command to the project whitelist and execute (future occurrences won't prompt)
+- **Edit** (3): Open an editor to modify the command before approval
+- **Block** (4 or ESC): Cancel the command execution
+
+You can quickly select an option by pressing its number (1-4) on your keyboard, or use arrow keys and Enter.
+
+## Always Accept & Whitelist
+
+When you select **"Always Accept"** in the confirmation dialog, the command is added to your project's whitelist and execution proceeds. Future occurrences of the exact same command in that project will not trigger a confirmation dialog.
+
+### How It Works
+
+- **Exact match**: Only the exact command string (trimmed) is whitelisted
+- **Per-project storage**: The whitelist is stored in `.pi/bash-confirm-whitelist.json` relative to your project root
+- **Takes precedence**: Whitelisted commands bypass confirmation even if they don't match any `safeCommands` patterns
+- **Survives restarts**: The whitelist persists across pi sessions
+
+### Example Flow
+
+```
+1. User runs: git push origin main
+2. Confirmation dialog appears
+3. User selects: "Always Accept" (option 2)
+4. Command executes and is added to whitelist
+5. Next time user runs "git push origin main" → executes immediately, no dialog
+```
+
+### Managing the Whitelist
+
+Use the `/bash-confirm whitelist` subcommands:
+
+| Command | Description |
+|---------|-------------|
+| `/bash-confirm whitelist list` | Show all whitelisted commands |
+| `/bash-confirm whitelist add <command> [note]` | Manually add a command to whitelist |
+| `/bash-confirm whitelist remove <command>` | Remove a command from whitelist |
+| `/bash-confirm whitelist clear` | Remove all entries from whitelist |
+| `/bash-confirm whitelist path` | Show path to whitelist file |
+
+### Whitelist File Format
+
+```json
+{
+  "entries": [
+    {
+      "command": "git push origin main",
+      "addedAt": "2026-01-26T16:51:49.123Z",
+      "note": "Always accept"
+    }
+  ],
+  "version": 1
+}
+```
+
+The whitelist file can be committed to version control if you want to share whitelisted commands with your team.
 
 ## Notification Examples
 
@@ -379,6 +437,11 @@ rm -rf ./old-dir-backup
 |---------|-------------|
 | `/bash-confirm test-notify` | Send a test notification to verify Telegram setup |
 | `/bash-confirm debug` | Display current configuration status |
+| `/bash-confirm whitelist list` | Show all whitelisted commands |
+| `/bash-confirm whitelist add <cmd> [note]` | Add a command to the project whitelist |
+| `/bash-confirm whitelist remove <cmd>` | Remove a command from the whitelist |
+| `/bash-confirm whitelist clear` | Remove all entries from the whitelist |
+| `/bash-confirm whitelist path` | Show path to the whitelist file |
 
 ## Configuration Priority
 
