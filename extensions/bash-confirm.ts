@@ -281,6 +281,15 @@ function truncateText(text: string, maxLength: number): string {
   return `${cut}\n\n...(truncated)`;
 }
 
+function ringTerminalBell(): void {
+  if (!process.stdout.isTTY) return;
+  try {
+    process.stdout.write("\x07");
+  } catch {
+    // Non-fatal: bell support depends on terminal settings.
+  }
+}
+
 function buildShownMessage(
   ctx: ExtensionContext,
   command: string,
@@ -559,6 +568,9 @@ export default function (pi: ExtensionAPI) {
     // Send notification that dialog is being shown
     debugNotify(ctx, settings, "Showing confirmation dialog");
     await sendShownNotification(ctx, command, pi);
+
+    // Ring terminal bell to draw attention while waiting for user confirmation.
+    ringTerminalBell();
 
     // Show confirmation dialog
     const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
