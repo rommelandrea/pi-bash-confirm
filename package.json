@@ -12,6 +12,9 @@
     "notifications"
   ],
   "main": "./extensions/bash-confirm.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
   "pi": {
     "extensions": [
       "./extensions/bash-confirm.ts"
@@ -39,5 +42,9 @@
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": ">=0.50.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
   }
 }

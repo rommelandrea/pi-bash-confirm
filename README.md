@@ -4,9 +4,9 @@ A [pi](https://github.com/mariozechner/pi) package that adds a confirmation dial
 
 ## Features
 
-- **Confirmation Dialog**: Interactively approve, edit, always accept (whitelist), or block bash commands before execution
+- **Confirmation Dialog**: Interactively approve, edit, always accept (exact/generic), or block bash commands before execution
 - **Command Patterns**: Configure safe commands (auto-allow) and blocked commands (auto-block) using regex
-- **Per-Project Whitelist**: Commands added to whitelist via "Always Accept" option won't prompt again in that project
+- **Per-Project Whitelist**: Commands added as exact or regex-pattern entries won't prompt again in that project
 - **Edit Mode**: Modify commands before approval using pi's built-in editor
 - **Telegram Notifications**: Get notified when commands are blocked or modified
 - **Non-Interactive Safety**: Blocks commands when UI is unavailable unless they match safe patterns
@@ -313,43 +313,50 @@ Working directory: /home/user/project
 
 > 1. Allow
     Execute the command as-is
-  2. Always Accept
-    Add to whitelist and execute
-  3. Edit
+  2. Always Accept (Exact)
+    Whitelist this exact command and execute
+  3. Always Accept (Generic)
+    Generate a regex pattern whitelist entry
+  4. Edit
     Modify the command before execution
-  4. Block
+  5. Block
     Cancel this command
 
-↑↓ navigate • enter select • 1-4 quick pick • esc cancel
+↑↓ navigate • enter select • 1-5 quick pick • esc cancel
 ```
 
 **Options:**
 - **Allow** (1): Execute the command as-is
-- **Always Accept** (2): Add the command to the project whitelist and execute (future occurrences won't prompt)
-- **Edit** (3): Open an editor to modify the command before approval
-- **Block** (4 or ESC): Cancel the command execution
+- **Always Accept (Exact)** (2): Add an exact-match command whitelist entry
+- **Always Accept (Generic)** (3): Generate a regex pattern, review/edit it, then whitelist it
+- **Edit** (4): Open an editor to modify the command before approval
+- **Block** (5 or ESC): Cancel the command execution
 
-You can quickly select an option by pressing its number (1-4) on your keyboard, or use arrow keys and Enter.
+You can quickly select an option by pressing its number (1-5) on your keyboard, or use arrow keys and Enter.
 
 ## Always Accept & Whitelist
 
-When you select **"Always Accept"** in the confirmation dialog, the command is added to your project's whitelist and execution proceeds. Future occurrences of the exact same command in that project will not trigger a confirmation dialog.
+The dialog supports two whitelist modes:
+
+- **Always Accept (Exact)**: stores the exact command string
+- **Always Accept (Generic)**: generates a regex pattern, lets you edit it, then stores it
 
 ### How It Works
 
-- **Exact match**: Only the exact command string (trimmed) is whitelisted
-- **Per-project storage**: The whitelist is stored in `.pi/bash-confirm-whitelist.json` relative to your project root
-- **Takes precedence**: Whitelisted commands bypass confirmation even if they don't match any `safeCommands` patterns
-- **Survives restarts**: The whitelist persists across pi sessions
+- **Entry types**: whitelist entries are either `exact` or `pattern`
+- **Per-project storage**: the whitelist is stored in `.pi/bash-confirm-whitelist.json` relative to your project root
+- **Match order**: `blockedCommands` → exact whitelist → pattern whitelist → `safeCommands`
+- **Survives restarts**: the whitelist persists across pi sessions
 
 ### Example Flow
 
 ```
-1. User runs: git push origin main
+1. User runs: git push origin feature/my-branch
 2. Confirmation dialog appears
-3. User selects: "Always Accept" (option 2)
-4. Command executes and is added to whitelist
-5. Next time user runs "git push origin main" → executes immediately, no dialog
+3. User selects: "Always Accept (Generic)" (option 3)
+4. Extension proposes a pattern like: ^git\s+push\s+origin\s+[\w./-]+$
+5. User confirms/edits the pattern and command executes
+6. Future matching push commands execute without prompt
 ```
 
 ### Managing the Whitelist
@@ -358,9 +365,10 @@ Use the `/bash-confirm whitelist` subcommands:
 
 | Command | Description |
 |---------|-------------|
-| `/bash-confirm whitelist list` | Show all whitelisted commands |
-| `/bash-confirm whitelist add <command> [note]` | Manually add a command to whitelist |
-| `/bash-confirm whitelist remove <command>` | Remove a command from whitelist |
+| `/bash-confirm whitelist list` | Show all whitelist entries |
+| `/bash-confirm whitelist add <command> [--note <note>]` | Add an exact-match whitelist entry |
+| `/bash-confirm whitelist add-pattern <regex> [--note <note>]` | Add a regex pattern whitelist entry |
+| `/bash-confirm whitelist remove <value>` | Remove entries with the exact stored value |
 | `/bash-confirm whitelist clear` | Remove all entries from whitelist |
 | `/bash-confirm whitelist path` | Show path to whitelist file |
 
@@ -370,12 +378,21 @@ Use the `/bash-confirm whitelist` subcommands:
 {
   "entries": [
     {
-      "command": "git push origin main",
+      "type": "exact",
+      "value": "git push origin main",
       "addedAt": "2026-01-26T16:51:49.123Z",
-      "note": "Always accept"
+      "note": "Always accept exact",
+      "source": "user"
+    },
+    {
+      "type": "pattern",
+      "value": "^git\\s+push\\s+origin\\s+[\\w./-]+$",
+      "addedAt": "2026-01-26T16:52:12.000Z",
+      "note": "Always accept generic",
+      "source": "ai"
     }
   ],
-  "version": 1
+  "version": 2
 }
 ```
 
@@ -437,9 +454,10 @@ rm -rf ./old-dir-backup
 |---------|-------------|
 | `/bash-confirm test-notify` | Send a test notification to verify Telegram setup |
 | `/bash-confirm debug` | Display current configuration status |
-| `/bash-confirm whitelist list` | Show all whitelisted commands |
-| `/bash-confirm whitelist add <cmd> [note]` | Add a command to the project whitelist |
-| `/bash-confirm whitelist remove <cmd>` | Remove a command from the whitelist |
+| `/bash-confirm whitelist list` | Show all whitelist entries |
+| `/bash-confirm whitelist add <cmd> [--note <note>]` | Add an exact command to the project whitelist |
+| `/bash-confirm whitelist add-pattern <regex> [--note <note>]` | Add a regex pattern to the project whitelist |
+| `/bash-confirm whitelist remove <value>` | Remove whitelist entries matching a stored value |
 | `/bash-confirm whitelist clear` | Remove all entries from the whitelist |
 | `/bash-confirm whitelist path` | Show path to the whitelist file |
 

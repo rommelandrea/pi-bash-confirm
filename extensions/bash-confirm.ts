@@ -9,15 +9,33 @@ import { join } from "node:path";
 
 type JsonObject = Record<string, unknown>;
 
+type WhitelistEntryType = "exact" | "pattern";
+type WhitelistEntrySource = "user" | "ai";
+
 type WhitelistEntry = {
-  command: string;
+  type: WhitelistEntryType;
+  value: string;
   addedAt: string;
+  note?: string;
+  source?: WhitelistEntrySource;
+};
+
+type LegacyWhitelistEntry = {
+  command?: string;
+  addedAt?: string;
   note?: string;
 };
 
 type WhitelistData = {
   entries: WhitelistEntry[];
   version: number;
+};
+
+type GeneratedPattern = {
+  pattern: string;
+  dynamicCount: number;
+  examples: string[];
+  warnings: string[];
 };
 
 type TelegramResponse<T> =
@@ -123,26 +141,217 @@ function formatNetworkError(error: unknown): string {
   return code ? `${error.message} (${String(code)})` : error.message;
 }
 
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function tokenizeCommand(command: string): string[] {
+  const matches = command.match(/"[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'|\S+/g);
+  return matches ?? [];
+}
+
+function classifyDynamicValue(value: string): { regex: string; example: string } | null {
+  if (!value) return null;
+  if (/^\d+$/.test(value)) return { regex: "\\d+", example: "42" };
+  if (/^[a-f0-9]{7,40}$/i.test(value)) return { regex: "[a-f0-9]{7,40}", example: "deadbeef" };
+  if (/^(~\/|\/|\.\/|\.\.\/)/.test(value) || value.includes("/")) {
+    return { regex: "[\\w./~-]+", example: "path/to/value" };
+  }
+  if (/^[\w.-]+$/.test(value) && (/[0-9]/.test(value) || value.includes("-") || value.includes("_"))) {
+    return { regex: "[\\w.-]+", example: "value-123" };
+  }
+  return null;
+}
+
+function tokenizeWithExamples(command: string): GeneratedPattern {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    return {
+      pattern: "^$",
+      dynamicCount: 0,
+      examples: [],
+      warnings: ["Command is empty"],
+    };
+  }
+
+  const tokens = tokenizeCommand(trimmed);
+  if (tokens.length === 0) {
+    return {
+      pattern: `^${escapeRegex(trimmed)}$`,
+      dynamicCount: 0,
+      examples: [trimmed],
+      warnings: ["Could not parse command tokens"],
+    };
+  }
+
+  const patternParts: string[] = [];
+  const exampleTokens = [...tokens];
+  let dynamicCount = 0;
+
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+
+    if (i === 0) {
+      patternParts.push(escapeRegex(token));
+      continue;
+    }
+
+    const eqIndex = token.indexOf("=");
+    if (/^--?[\w-]+=/.test(token) && eqIndex > 0) {
+      const key = token.slice(0, eqIndex);
+      const value = token.slice(eqIndex + 1);
+      const dynamic = classifyDynamicValue(value);
+      if (dynamic) {
+        patternParts.push(`${escapeRegex(key)}=${dynamic.regex}`);
+        exampleTokens[i] = `${key}=${dynamic.example}`;
+        dynamicCount++;
+        continue;
+      }
+      patternParts.push(escapeRegex(token));
+      continue;
+    }
+
+    if (/^--?[\w-]+$/.test(token)) {
+      patternParts.push(escapeRegex(token));
+      continue;
+    }
+
+    const quoted = (token.startsWith("\"") && token.endsWith("\"")) || (token.startsWith("'") && token.endsWith("'"));
+    if (quoted && token.length >= 2) {
+      const quote = token[0];
+      const inner = token.slice(1, -1);
+      const dynamic = classifyDynamicValue(inner);
+      if (dynamic) {
+        if (quote === "\"") {
+          patternParts.push(`\"[^\"]+\"`);
+          exampleTokens[i] = `"${dynamic.example}"`;
+        } else {
+          patternParts.push(`'[^']+'`);
+          exampleTokens[i] = `'${dynamic.example}'`;
+        }
+        dynamicCount++;
+        continue;
+      }
+      patternParts.push(escapeRegex(token));
+      continue;
+    }
+
+    const dynamic = classifyDynamicValue(token);
+    if (dynamic) {
+      patternParts.push(dynamic.regex);
+      exampleTokens[i] = dynamic.example;
+      dynamicCount++;
+      continue;
+    }
+
+    patternParts.push(escapeRegex(token));
+  }
+
+  const pattern = `^${patternParts.join("\\s+")}$`;
+  const examples = [trimmed];
+  const generatedExample = exampleTokens.join(" ");
+  if (generatedExample !== trimmed) examples.push(generatedExample);
+
+  const warnings: string[] = [];
+  if (dynamicCount === 0) warnings.push("No dynamic tokens detected. Pattern is effectively exact.");
+  if (pattern.includes(".*")) warnings.push("Pattern contains broad wildcard (.*). Consider tightening it.");
+
+  return { pattern, dynamicCount, examples, warnings };
+}
+
+function validateWhitelistPattern(pattern: string): { ok: true } | { ok: false; reason: string } {
+  const trimmed = pattern.trim();
+  if (!trimmed) return { ok: false, reason: "Pattern is empty" };
+  if (!trimmed.startsWith("^") || !trimmed.endsWith("$")) {
+    return { ok: false, reason: "Pattern must be anchored with ^ and $" };
+  }
+  if (trimmed === "^.*$" || trimmed === "^.+$") {
+    return { ok: false, reason: "Pattern is too broad" };
+  }
+  if (trimmed.includes(".*")) {
+    return { ok: false, reason: "Pattern contains broad wildcard (.*), which is not allowed" };
+  }
+
+  try {
+    new RegExp(trimmed);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, reason: `Invalid regex: ${message}` };
+  }
+
+  return { ok: true };
+}
+
+function normalizeWhitelistEntry(raw: unknown): WhitelistEntry | null {
+  if (!isPlainObject(raw)) return null;
+
+  const maybeLegacy = raw as LegacyWhitelistEntry;
+  if (typeof maybeLegacy.command === "string") {
+    const value = maybeLegacy.command.trim();
+    if (!value) return null;
+    return {
+      type: "exact",
+      value,
+      addedAt: maybeLegacy.addedAt || new Date().toISOString(),
+      note: maybeLegacy.note,
+      source: "user",
+    };
+  }
+
+  const type = raw.type;
+  const value = raw.value;
+  const addedAt = raw.addedAt;
+  const note = raw.note;
+  const source = raw.source;
+
+  if ((type !== "exact" && type !== "pattern") || typeof value !== "string") return null;
+  const trimmedValue = value.trim();
+  if (!trimmedValue) return null;
+
+  if (type === "pattern") {
+    const validation = validateWhitelistPattern(trimmedValue);
+    if (!validation.ok) return null;
+  }
+
+  return {
+    type,
+    value: trimmedValue,
+    addedAt: typeof addedAt === "string" ? addedAt : new Date().toISOString(),
+    note: typeof note === "string" && note.trim() ? note.trim() : undefined,
+    source: source === "ai" || source === "user" ? source : undefined,
+  };
+}
+
 function loadWhitelist(cwd: string): WhitelistData {
   const whitelistPath = join(cwd, ".pi", "bash-confirm-whitelist.json");
 
   if (!existsSync(whitelistPath)) {
-    return { entries: [], version: 1 };
+    return { entries: [], version: 2 };
   }
 
   try {
     const data = JSON.parse(readFileSync(whitelistPath, "utf-8")) as unknown;
     if (isPlainObject(data)) {
       const obj = data as Record<string, unknown>;
-      const entries = Array.isArray(obj.entries) ? (obj.entries as WhitelistEntry[]) : [];
+      const rawEntries = Array.isArray(obj.entries) ? obj.entries : [];
+      const entries = rawEntries
+        .map(entry => normalizeWhitelistEntry(entry))
+        .filter((entry): entry is WhitelistEntry => entry !== null);
       const version = typeof obj.version === "number" ? obj.version : 1;
-      return { entries, version };
+      const normalized: WhitelistData = { entries, version: 2 };
+
+      // Migrate old shape (v1 command entries) or clean invalid entries.
+      if (version < 2 || entries.length !== rawEntries.length) {
+        saveWhitelist(cwd, normalized);
+      }
+
+      return normalized;
     }
-  } catch (error: unknown) {
+  } catch {
     // Ignore errors and return default
   }
 
-  return { entries: [], version: 1 };
+  return { entries: [], version: 2 };
 }
 
 function saveWhitelist(cwd: string, whitelist: WhitelistData): void {
@@ -158,43 +367,62 @@ function saveWhitelist(cwd: string, whitelist: WhitelistData): void {
   try {
     writeFileSync(
       join(cwd, ".pi", "bash-confirm-whitelist.json"),
-      JSON.stringify(whitelist, null, 2),
+      JSON.stringify({ ...whitelist, version: 2 }, null, 2),
       "utf-8",
     );
-  } catch (error: unknown) {
+  } catch {
     // Silent fail - can't write whitelist file
   }
 }
 
-function addToWhitelist(cwd: string, command: string, note?: string): void {
-  const trimmed = command.trim();
-  if (!trimmed) return;
-  const whitelist = loadWhitelist(cwd);
+function addWhitelistEntry(
+  cwd: string,
+  entry: { type: WhitelistEntryType; value: string; note?: string; source?: WhitelistEntrySource }
+): boolean {
+  const value = entry.value.trim();
+  if (!value) return false;
 
-  // Check if already whitelisted
-  if (whitelist.entries.some(entry => entry.command.trim() === trimmed)) {
-    return;
+  if (entry.type === "pattern") {
+    const validation = validateWhitelistPattern(value);
+    if (!validation.ok) return false;
   }
 
-  whitelist.entries.push({
-    command: trimmed,
-    addedAt: new Date().toISOString(),
-    note,
-  });
-
-  saveWhitelist(cwd, whitelist);
-}
-
-function removeFromWhitelist(cwd: string, command: string): boolean {
-  const trimmed = command.trim();
   const whitelist = loadWhitelist(cwd);
-  const index = whitelist.entries.findIndex(entry => entry.command.trim() === trimmed);
-
-  if (index === -1) {
+  if (whitelist.entries.some(existing => existing.type === entry.type && existing.value === value)) {
     return false;
   }
 
-  whitelist.entries.splice(index, 1);
+  whitelist.entries.push({
+    type: entry.type,
+    value,
+    addedAt: new Date().toISOString(),
+    note: entry.note,
+    source: entry.source,
+  });
+
+  saveWhitelist(cwd, whitelist);
+  return true;
+}
+
+function addExactToWhitelist(cwd: string, command: string, note?: string, source: WhitelistEntrySource = "user"): boolean {
+  return addWhitelistEntry(cwd, { type: "exact", value: command, note, source });
+}
+
+function addPatternToWhitelist(cwd: string, pattern: string, note?: string, source: WhitelistEntrySource = "ai"): boolean {
+  return addWhitelistEntry(cwd, { type: "pattern", value: pattern, note, source });
+}
+
+function removeFromWhitelist(cwd: string, value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+
+  const whitelist = loadWhitelist(cwd);
+  const nextEntries = whitelist.entries.filter(entry => entry.value !== trimmed);
+  if (nextEntries.length === whitelist.entries.length) {
+    return false;
+  }
+
+  whitelist.entries = nextEntries;
   saveWhitelist(cwd, whitelist);
   return true;
 }
@@ -202,7 +430,47 @@ function removeFromWhitelist(cwd: string, command: string): boolean {
 function formatWhitelistEntry(entry: WhitelistEntry, index: number): string {
   const date = new Date(entry.addedAt).toLocaleString();
   const note = entry.note ? ` (${entry.note})` : "";
-  return `${index + 1}. ${escapeHtml(entry.command)} ${escapeHtml(note)}\n   Added: ${date}`;
+  const source = entry.source ? ` [source: ${entry.source}]` : "";
+  return `${index + 1}. [${entry.type}] ${escapeHtml(entry.value)}${escapeHtml(note)}${escapeHtml(source)}\n   Added: ${date}`;
+}
+
+function matchesRegexList(input: string, patterns: string[] | undefined): boolean {
+  if (!patterns || patterns.length === 0) return false;
+  for (const pattern of patterns) {
+    try {
+      if (new RegExp(pattern).test(input)) return true;
+    } catch {
+      // Ignore invalid config regexes
+    }
+  }
+  return false;
+}
+
+function compileWhitelistPatterns(entries: WhitelistEntry[]): RegExp[] {
+  const compiled: RegExp[] = [];
+  for (const entry of entries) {
+    if (entry.type !== "pattern") continue;
+    const validation = validateWhitelistPattern(entry.value);
+    if (!validation.ok) continue;
+    try {
+      compiled.push(new RegExp(entry.value));
+    } catch {
+      // Ignore invalid regex entries
+    }
+  }
+  return compiled;
+}
+
+function parseValueAndNote(input: string): { value: string; note?: string } {
+  const marker = " --note ";
+  const markerIndex = input.indexOf(marker);
+  if (markerIndex === -1) {
+    return { value: input.trim() };
+  }
+
+  const value = input.slice(0, markerIndex).trim();
+  const note = input.slice(markerIndex + marker.length).trim() || undefined;
+  return { value, note };
 }
 
 async function telegramCall<T>(options: {
@@ -529,13 +797,21 @@ export default function (pi: ExtensionAPI) {
     const segmentsToCheck = segments.length > 0 ? segments : (command.trim() ? [command.trim()] : []);
 
     const whitelist = loadWhitelist(ctx.cwd);
-    const whitelistSet = new Set(whitelist.entries.map(entry => entry.command.trim()).filter(Boolean));
+    const exactWhitelistSet = new Set(
+      whitelist.entries
+        .filter(entry => entry.type === "exact")
+        .map(entry => entry.value.trim())
+        .filter(Boolean)
+    );
+    const whitelistPatterns = compileWhitelistPatterns(whitelist.entries);
 
     const isBlockedSegment = (segment: string): boolean =>
-      config.blockedCommands?.some(pattern => new RegExp(pattern).test(segment)) ?? false;
+      matchesRegexList(segment, config.blockedCommands);
     const isSafeSegment = (segment: string): boolean =>
-      config.safeCommands?.some(pattern => new RegExp(pattern).test(segment)) ?? false;
-    const isWhitelistedSegment = (segment: string): boolean => whitelistSet.has(segment);
+      matchesRegexList(segment, config.safeCommands);
+    const isExactWhitelistedSegment = (segment: string): boolean => exactWhitelistSet.has(segment);
+    const isPatternWhitelistedSegment = (segment: string): boolean =>
+      whitelistPatterns.some(pattern => pattern.test(segment));
 
     const blockedSegment = segmentsToCheck.find(segment => isBlockedSegment(segment));
     if (blockedSegment) {
@@ -551,10 +827,14 @@ export default function (pi: ExtensionAPI) {
     const allAllowed =
       !parsed.requiresConfirmation &&
       segmentsToCheck.length > 0 &&
-      segmentsToCheck.every(segment => isWhitelistedSegment(segment) || isSafeSegment(segment));
+      segmentsToCheck.every(segment => {
+        if (isExactWhitelistedSegment(segment)) return true;
+        if (isPatternWhitelistedSegment(segment)) return true;
+        return isSafeSegment(segment);
+      });
 
     if (allAllowed) {
-      debugNotify(ctx, settings, "Allowed: all segments match whitelist/safe patterns");
+      debugNotify(ctx, settings, "Allowed: all segments matched exact/pattern whitelist or safeCommands");
       return undefined; // Allow without confirmation
     }
 
@@ -573,11 +853,12 @@ export default function (pi: ExtensionAPI) {
     ringTerminalBell();
 
     // Show confirmation dialog
-    const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
+    const result = await ctx.ui.custom((tui, theme, _kb, done) => {
       let selectedIndex = 0;
       const options = [
         { value: "allow", label: "Allow", description: "Execute the command as-is" },
-        { value: "always-accept", label: "Always Accept", description: "Add to whitelist and execute" },
+        { value: "always-accept", label: "Always Accept (Exact)", description: "Whitelist this exact command and execute" },
+        { value: "always-accept-generic", label: "Always Accept (Generic)", description: "Generate a regex pattern whitelist entry" },
         { value: "edit", label: "Edit", description: "Modify the command before execution" },
         { value: "block", label: "Block", description: "Cancel this command" },
       ];
@@ -647,7 +928,7 @@ export default function (pi: ExtensionAPI) {
 
         // Help text
         lines.push("");
-        lines.push(theme.fg("dim", "↑↓ navigate • enter select • 1-4 quick pick • esc cancel"));
+        lines.push(theme.fg("dim", "↑↓ navigate • enter select • 1-5 quick pick • esc cancel"));
 
         return lines;
       }
@@ -664,12 +945,50 @@ export default function (pi: ExtensionAPI) {
       case "allow":
         debugNotify(ctx, settings, "User allowed command");
         return undefined; // Execute normally
-      case "always-accept":
-        debugNotify(ctx, settings, "User allowed and whitelisted command");
-        // Add to whitelist
-        addToWhitelist(ctx.cwd, command, "Always accept");
-        ctx.ui.notify("Added to whitelist: " + command, "success");
+      case "always-accept": {
+        debugNotify(ctx, settings, "User allowed and exactly whitelisted command");
+        const added = addExactToWhitelist(ctx.cwd, command, "Always accept exact", "user");
+        ctx.ui.notify(
+          added ? `Added exact whitelist entry: ${command}` : `Exact whitelist entry already exists: ${command}`,
+          added ? "success" : "info",
+        );
         return undefined; // Execute normally
+      }
+      case "always-accept-generic": {
+        debugNotify(ctx, settings, "User chose generic whitelist pattern");
+        const generated = tokenizeWithExamples(command);
+
+        ctx.ui.notify(`Generated pattern: ${generated.pattern}`, "info");
+        if (generated.examples[1]) {
+          ctx.ui.notify(`Example allowed command: ${generated.examples[1]}`, "info");
+        }
+        for (const warning of generated.warnings) {
+          ctx.ui.notify(`Pattern warning: ${warning}`, "warning");
+        }
+
+        const editedPattern = await ctx.ui.editor("Edit generic whitelist regex (^...$):", generated.pattern);
+        if (!editedPattern) {
+          debugNotify(ctx, settings, "User cancelled generic pattern edit");
+          return await blockAndStop(ctx, command, "Generic pattern edit cancelled", pi);
+        }
+
+        const validation = validateWhitelistPattern(editedPattern);
+        if (validation.ok === false) {
+          const reason = validation.reason;
+          ctx.ui.notify(`Invalid generic pattern: ${reason}`, "warning");
+          return await blockAndStop(ctx, command, `Invalid generic pattern: ${reason}`, pi);
+        }
+
+        const added = addPatternToWhitelist(ctx.cwd, editedPattern, "Always accept generic", "ai");
+        ctx.ui.notify(
+          added
+            ? `Added generic whitelist pattern: ${editedPattern}`
+            : `Generic whitelist pattern already exists: ${editedPattern}`,
+          added ? "success" : "info",
+        );
+
+        return undefined; // Execute normally
+      }
       case "block":
         debugNotify(ctx, settings, "User blocked command");
         return await blockAndStop(ctx, command, "Blocked by user", pi);
@@ -738,13 +1057,12 @@ export default function (pi: ExtensionAPI) {
               timeoutMs: 3000,
               family: forceIpv4 ? 4 : undefined,
             });
-            if (me.ok) {
+            if (me.ok === true) {
               ctx.ui.notify(`Telegram getMe ok: @${me.result.username ?? "(no username)"} (${me.result.id})`, "info");
             } else {
-              ctx.ui.notify(
-                `Telegram getMe failed: ${me.description ?? "Unknown error"}${me.error_code ? ` (code ${me.error_code})` : ""}`,
-                "warning",
-              );
+              const description = me.description ?? "Unknown error";
+              const code = me.error_code ? ` (code ${me.error_code})` : "";
+              ctx.ui.notify(`Telegram getMe failed: ${description}${code}`, "warning");
             }
           } catch (error: unknown) {
             const err = error instanceof Error ? error.message : String(error);
@@ -755,12 +1073,13 @@ export default function (pi: ExtensionAPI) {
       }
 
       // Whitelist commands
-      const wlCmd = cmd.startsWith("whitelist ") ? cmd.slice("whitelist ".length).trim() : cmd;
-      if (wlCmd) {
-        const wlArgs = cmd.slice("whitelist ".length).trim();
+      if (cmd === "whitelist" || cmd.startsWith("whitelist ")) {
+        const wlInput = cmd.slice("whitelist".length).trim();
+        const subcommandRaw = wlInput.split(/\s+/, 1)[0] || "list";
+        const subcommand = subcommandRaw.toLowerCase();
+        const wlArgs = wlInput.slice(subcommandRaw.length).trim();
 
-        // List whitelist
-        if (wlCmd === "list" || wlCmd === "ls") {
+        if (subcommand === "list" || subcommand === "ls") {
           const whitelist = loadWhitelist(ctx.cwd);
           ctx.ui.notify(`Whitelist (${whitelist.entries.length} entries):`, "info");
           if (whitelist.entries.length === 0) {
@@ -773,41 +1092,57 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        // Add to whitelist
-        if (wlCmd === "add" || wlCmd === "a") {
-          const spaceIndex = wlArgs.indexOf(" ");
-          let command = wlArgs;
-          let note: string | undefined;
-          if (spaceIndex > 0) {
-            command = wlArgs.slice(0, spaceIndex);
-            note = wlArgs.slice(spaceIndex + 1).trim() || undefined;
-          }
-          if (!command) {
-            ctx.ui.notify("Usage: /bash-confirm whitelist add <command> [note]", "warning");
+        if (subcommand === "add" || subcommand === "a" || subcommand === "add-exact") {
+          const parsed = parseValueAndNote(wlArgs);
+          if (!parsed.value) {
+            ctx.ui.notify("Usage: /bash-confirm whitelist add <command> [--note <note>]", "warning");
             return;
           }
-          addToWhitelist(ctx.cwd, command, note);
-          ctx.ui.notify(`Added to whitelist: ${command}`, "success");
+
+          const added = addExactToWhitelist(ctx.cwd, parsed.value, parsed.note, "user");
+          ctx.ui.notify(
+            added ? `Added exact whitelist entry: ${parsed.value}` : `Exact whitelist entry already exists: ${parsed.value}`,
+            added ? "success" : "info",
+          );
           return;
         }
 
-        // Remove from whitelist
-        if (wlCmd === "remove" || wlCmd === "rm" || wlCmd === "delete" || wlCmd === "del") {
+        if (subcommand === "add-pattern" || subcommand === "ap") {
+          const parsed = parseValueAndNote(wlArgs);
+          if (!parsed.value) {
+            ctx.ui.notify("Usage: /bash-confirm whitelist add-pattern <regex> [--note <note>]", "warning");
+            return;
+          }
+
+          const validation = validateWhitelistPattern(parsed.value);
+          if (validation.ok === false) {
+            ctx.ui.notify(`Invalid pattern: ${validation.reason}`, "warning");
+            return;
+          }
+
+          const added = addPatternToWhitelist(ctx.cwd, parsed.value, parsed.note, "user");
+          ctx.ui.notify(
+            added ? `Added pattern whitelist entry: ${parsed.value}` : `Pattern whitelist entry already exists: ${parsed.value}`,
+            added ? "success" : "info",
+          );
+          return;
+        }
+
+        if (subcommand === "remove" || subcommand === "rm" || subcommand === "delete" || subcommand === "del") {
           if (!wlArgs) {
-            ctx.ui.notify("Usage: /bash-confirm whitelist remove <command>", "warning");
+            ctx.ui.notify("Usage: /bash-confirm whitelist remove <value>", "warning");
             return;
           }
           const removed = removeFromWhitelist(ctx.cwd, wlArgs);
           if (removed) {
-            ctx.ui.notify(`Removed from whitelist: ${wlArgs}`, "success");
+            ctx.ui.notify(`Removed whitelist entry: ${wlArgs}`, "success");
           } else {
-            ctx.ui.notify(`Command not in whitelist: ${wlArgs}`, "warning");
+            ctx.ui.notify(`Whitelist entry not found: ${wlArgs}`, "warning");
           }
           return;
         }
 
-        // Clear whitelist
-        if (wlCmd === "clear" || wlCmd === "delete-all") {
+        if (subcommand === "clear" || subcommand === "delete-all") {
           const whitelist = loadWhitelist(ctx.cwd);
           if (whitelist.entries.length === 0) {
             ctx.ui.notify("Whitelist is already empty", "info");
@@ -819,13 +1154,12 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        // Show whitelist file location
-        if (wlCmd === "path" || wlCmd === "where" || wlCmd === "file") {
+        if (subcommand === "path" || subcommand === "where" || subcommand === "file") {
           ctx.ui.notify(`Whitelist file: ${join(ctx.cwd, ".pi", "bash-confirm-whitelist.json")}`, "info");
           return;
         }
 
-        ctx.ui.notify("Usage: /bash-confirm whitelist [list|add|remove|clear|path]", "info");
+        ctx.ui.notify("Usage: /bash-confirm whitelist [list|add|add-pattern|remove|clear|path]", "info");
         return;
       }
 
@@ -835,6 +1169,6 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     const whitelist = loadWhitelist(ctx.cwd);
-    ctx.ui.notify(`Bash confirmation extension loaded (/bash-confirm) - ${whitelist.entries.length} whitelisted command${whitelist.entries.length !== 1 ? "s" : ""}`, "info");
+    ctx.ui.notify(`Bash confirmation extension loaded (/bash-confirm) - ${whitelist.entries.length} whitelist entr${whitelist.entries.length === 1 ? "y" : "ies"}`, "info");
   });
 }

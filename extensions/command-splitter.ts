@@ -1,23 +1,39 @@
-export function splitCommand(command, options = {}) {
-  const depthLimit = Number.isFinite(options.depthLimit) ? options.depthLimit : 5;
+type SplitCommandOptions = {
+  depthLimit?: number;
+};
+
+type SplitCommandResult = {
+  segments: string[];
+  operators: string[];
+  requiresConfirmation: boolean;
+};
+
+type ExtractionResult = {
+  content: string;
+  endIndex: number;
+  aborted: boolean;
+};
+
+export function splitCommand(command: unknown, options: SplitCommandOptions = {}): SplitCommandResult {
+  const depthLimit = Number.isFinite(options.depthLimit) ? Number(options.depthLimit) : 5;
   return parseCommand(String(command ?? ""), 0, depthLimit);
 }
 
-function parseCommand(input, depth, depthLimit) {
+function parseCommand(input: string, depth: number, depthLimit: number): SplitCommandResult {
   if (depth > depthLimit) {
     return { segments: [], operators: [], requiresConfirmation: true };
   }
 
-  const segments = [];
-  const operators = [];
+  const segments: string[] = [];
+  const operators: string[] = [];
   let requiresConfirmation = false;
   let current = "";
-  let quote = null;
+  let quote: "'" | '"' | null = null;
   let escape = false;
-  let nestedSegments = [];
-  let nestedOperators = [];
+  let nestedSegments: string[] = [];
+  let nestedOperators: string[] = [];
 
-  const pushSegment = (fromOperator = false) => {
+  const pushSegment = (fromOperator = false): void => {
     const trimmed = current.trim();
     if (trimmed.length > 0) {
       segments.push(trimmed);
@@ -154,8 +170,8 @@ function parseCommand(input, depth, depthLimit) {
   return { segments, operators, requiresConfirmation };
 }
 
-function extractCommandSubstitution(input, startIndex) {
-  let quote = null;
+function extractCommandSubstitution(input: string, startIndex: number): ExtractionResult {
+  let quote: "'" | '"' | null = null;
   let escape = false;
   let depth = 1;
 
@@ -212,7 +228,7 @@ function extractCommandSubstitution(input, startIndex) {
   return { content: input.slice(startIndex), endIndex: input.length - 1, aborted: true };
 }
 
-function extractBacktick(input, startIndex) {
+function extractBacktick(input: string, startIndex: number): ExtractionResult {
   let escape = false;
 
   for (let i = startIndex; i < input.length; i += 1) {
