@@ -737,10 +737,11 @@ function buildAutoAcceptPrompt(cwd: string, command: string): string {
     '{"decision":"allow|review","reason":"short explanation"}',
     "",
     "Decision policy:",
-    "- allow: read-only, navigation, inspection, harmless local operations",
-    "- review: destructive, privilege escalation, data exfiltration, risky remote execution, or uncertain",
+    "- allow ONLY when the command is clearly read-only/inspection/navigation and does not change files, git history, system state, or network-exposed state.",
+    "- review for any mutating operation, including writes/edits, package install/update/remove, service/process control, permissions/ownership changes, git state changes (commit/rebase/reset/merge/push), publish/deploy/release actions, remote execution, or uncertainty.",
+    "- if a command chain has mixed safety, choose review.",
     "",
-    "Be conservative. If uncertain, return review.",
+    "Be strict and conservative. Default to review unless clearly read-only.",
     "",
     `Working directory: ${cwd}`,
     `Command: ${command}`,
@@ -1404,6 +1405,7 @@ export default function (pi: ExtensionAPI) {
         enabled?: boolean;
         model?: string;
         timeoutMs?: number;
+        neverAllowPatterns?: string[];
       };
     };
 
@@ -1473,8 +1475,17 @@ export default function (pi: ExtensionAPI) {
       return undefined; // Allow without confirmation
     }
 
+    const autoAcceptNeverAllowPatterns = config.autoAccept?.neverAllowPatterns;
+    const matchesNeverAllowPattern =
+      matchesRegexList(trimmedCommand, autoAcceptNeverAllowPatterns) ||
+      segmentsToCheck.some(segment => matchesRegexList(segment, autoAcceptNeverAllowPatterns));
+
+    if (matchesNeverAllowPattern) {
+      debugNotify(ctx, settings, "auto-accept bypassed: command matched autoAccept.neverAllowPatterns");
+    }
+
     const autoAcceptEnabled = config.autoAccept?.enabled === true;
-    if (autoAcceptEnabled) {
+    if (autoAcceptEnabled && !matchesNeverAllowPattern) {
       const autoAccept = await evaluateAutoAcceptCommand(command, ctx, settings);
       if (autoAccept.result) {
         if (autoAccept.result.decision === "allow") {
@@ -1716,6 +1727,7 @@ export default function (pi: ExtensionAPI) {
         const autoAcceptEnabled = getSetting(settings, "bashConfirm.autoAccept.enabled", false);
         const autoAcceptModel = getSetting(settings, "bashConfirm.autoAccept.model", "");
         const autoAcceptTimeoutMs = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
+        const autoAcceptNeverAllowPatterns = getSetting(settings, "bashConfirm.autoAccept.neverAllowPatterns", []) as string[];
 
         ctx.ui.notify(`bash-confirm: enabled=${enabled}, debug=${debugEnabled}`, "info");
         ctx.ui.notify(`notifications: enabled=${notifyEnabled}, onShown=${onShown}, onBlocked=${onBlocked}, onModified=${onModified}`, "info");
@@ -1724,6 +1736,10 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`blockedCommands: [${blockedCommands.join(", ") || "(none)"}]`, "info");
         ctx.ui.notify(
           `autoAccept: enabled=${autoAcceptEnabled}, model=${autoAcceptModel || "(current model)"}, timeoutMs=${autoAcceptTimeoutMs}`,
+          "info",
+        );
+        ctx.ui.notify(
+          `autoAccept.neverAllowPatterns: [${autoAcceptNeverAllowPatterns.join(", ") || "(none)"}]`,
           "info",
         );
         ctx.ui.notify(`settings: global=${globalSettingsPath}`, "info");
@@ -1760,11 +1776,16 @@ export default function (pi: ExtensionAPI) {
         const autoEnabled = getSetting(settings, "bashConfirm.autoAccept.enabled", false);
         const autoModel = getSetting(settings, "bashConfirm.autoAccept.model", "");
         const autoTimeoutMs = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
+        const autoNeverAllowPatterns = getSetting(settings, "bashConfirm.autoAccept.neverAllowPatterns", []) as string[];
 
         if (!autoArgs || autoArgs === "status") {
           ctx.ui.notify(`auto-accept enabled: ${autoEnabled}`, "info");
           ctx.ui.notify(`auto-accept model: ${autoModel || "(current model)"}`, "info");
           ctx.ui.notify(`auto-accept timeoutMs: ${autoTimeoutMs}`, "info");
+          ctx.ui.notify(
+            `auto-accept neverAllowPatterns: [${autoNeverAllowPatterns.join(", ") || "(none)"}]`,
+            "info",
+          );
           return;
         }
 

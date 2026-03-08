@@ -24,7 +24,11 @@
     "autoAccept": {
       "enabled": false,
       "model": "openrouter/google/gemini-2.0-flash-001",
-      "timeoutMs": 5000
+      "timeoutMs": 5000,
+      "neverAllowPatterns": [
+        "^git\\s+push(?:\\s|$)",
+        "^npm\\s+publish(?:\\s|$)"
+      ]
     },
     "notifications": {
       "enabled": true,

@@ -123,6 +123,7 @@ View your current configuration:
 | `autoAccept.enabled` | boolean | `false` | Enable optional model-based auto-accept decision flow |
 | `autoAccept.model` | string | `""` | Model reference (`provider/modelId`) used for auto-accept; falls back to current model when empty |
 | `autoAccept.timeoutMs` | number | `5000` | Timeout for auto-accept model request (clamped to 1000-20000 ms) |
+| `autoAccept.neverAllowPatterns` | string[] | `[]` | Regex patterns that must always require manual confirmation (auto-accept is skipped) |
 
 ### Notification Options
 
@@ -436,7 +437,11 @@ Example:
     "autoAccept": {
       "enabled": true,
       "model": "openrouter/google/gemini-2.0-flash-001",
-      "timeoutMs": 4000
+      "timeoutMs": 4000,
+      "neverAllowPatterns": [
+        "^git\\s+push(?:\\s|$)",
+        "^npm\\s+publish(?:\\s|$)"
+      ]
     }
   }
 }
@@ -444,6 +449,8 @@ Example:
 
 Notes:
 - This mode is **optional** and off by default.
+- The model prompt is intentionally strict: default to `review` unless a command is clearly read-only.
+- Use `autoAccept.neverAllowPatterns` to force manual review for command families you never want auto-approved.
 - Use a low-latency model to keep shell flow responsive.
 - The command text is sent to the configured model for evaluation.
 
