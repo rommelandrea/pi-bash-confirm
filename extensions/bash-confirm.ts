@@ -524,6 +524,28 @@ const GENERALIZE_MARKER = "[BASH_CONFIRM_GENERALIZE_V1]";
 const AUTO_ACCEPT_MARKER = "[BASH_CONFIRM_AUTO_ACCEPT_V1]";
 let pendingGeneralizationRequest: PendingGeneralizationRequest | undefined;
 
+type AutoAcceptSessionOverride = "on" | "off";
+const autoAcceptSessionOverrides = new Map<string, AutoAcceptSessionOverride>();
+
+function getSessionOverrideKey(ctx: ExtensionContext): string {
+  const sessionId = typeof ctx.sessionId === "string" && ctx.sessionId.trim()
+    ? ctx.sessionId.trim()
+    : "(no-session)";
+  return `${ctx.cwd}::${sessionId}`;
+}
+
+function getAutoAcceptSessionOverride(ctx: ExtensionContext): AutoAcceptSessionOverride | undefined {
+  return autoAcceptSessionOverrides.get(getSessionOverrideKey(ctx));
+}
+
+function setAutoAcceptSessionOverride(ctx: ExtensionContext, mode: AutoAcceptSessionOverride): void {
+  autoAcceptSessionOverrides.set(getSessionOverrideKey(ctx), mode);
+}
+
+function clearAutoAcceptSessionOverride(ctx: ExtensionContext): void {
+  autoAcceptSessionOverrides.delete(getSessionOverrideKey(ctx));
+}
+
 function buildWhitelistAnalysisSnapshot(entries: WhitelistEntry[]): WhitelistAnalysisSnapshot {
   const exactEntries = entries
     .filter(entry => entry.type === "exact")
@@ -737,11 +759,12 @@ function buildAutoAcceptPrompt(cwd: string, command: string): string {
     '{"decision":"allow|review","reason":"short explanation"}',
     "",
     "Decision policy:",
-    "- allow ONLY when the command is clearly read-only/inspection/navigation and does not change files, git history, system state, or network-exposed state.",
-    "- review for any mutating operation, including writes/edits, package install/update/remove, service/process control, permissions/ownership changes, git state changes (commit/rebase/reset/merge/push), publish/deploy/release actions, remote execution, or uncertainty.",
-    "- if a command chain has mixed safety, choose review.",
+    "- allow when the command is clearly read-only/inspection/navigation and does not change files, git history, system state, or remote state.",
+    "- allow common local verification commands when they are check-only (for example: eslint without --fix, tsc --noEmit, npm/pnpm/yarn/bun run lint|typecheck|test, prettier --check).",
+    "- review for mutating operations: writes/edits, --fix/--write style flags, package install/update/remove, service/process control, permissions/ownership changes, git state changes (commit/rebase/reset/merge/push), publish/deploy/release, remote execution, or uncertainty.",
+    "- for command chains, allow only if every segment is clearly check-only/read-only; otherwise choose review.",
     "",
-    "Be strict and conservative. Default to review unless clearly read-only.",
+    "Be conservative. If uncertain, return review.",
     "",
     `Working directory: ${cwd}`,
     `Command: ${command}`,
@@ -1484,7 +1507,16 @@ export default function (pi: ExtensionAPI) {
       debugNotify(ctx, settings, "auto-accept bypassed: command matched autoAccept.neverAllowPatterns");
     }
 
-    const autoAcceptEnabled = config.autoAccept?.enabled === true;
+    const autoAcceptEnabledByConfig = config.autoAccept?.enabled === true;
+    const autoAcceptSessionOverride = getAutoAcceptSessionOverride(ctx);
+    const autoAcceptEnabled = autoAcceptSessionOverride
+      ? autoAcceptSessionOverride === "on"
+      : autoAcceptEnabledByConfig;
+
+    if (autoAcceptSessionOverride) {
+      debugNotify(ctx, settings, `auto-accept session override active: ${autoAcceptSessionOverride}`);
+    }
+
     if (autoAcceptEnabled && !matchesNeverAllowPattern) {
       const autoAccept = await evaluateAutoAcceptCommand(command, ctx, settings);
       if (autoAccept.result) {
@@ -1724,10 +1756,14 @@ export default function (pi: ExtensionAPI) {
         const forceIpv4 = getSetting(settings, "bashConfirm.notifications.telegram.forceIpv4", true);
         const safeCommands = getSetting(settings, "bashConfirm.safeCommands", []) as string[];
         const blockedCommands = getSetting(settings, "bashConfirm.blockedCommands", []) as string[];
-        const autoAcceptEnabled = getSetting(settings, "bashConfirm.autoAccept.enabled", false);
+        const autoAcceptEnabledByConfig = getSetting(settings, "bashConfirm.autoAccept.enabled", false);
         const autoAcceptModel = getSetting(settings, "bashConfirm.autoAccept.model", "");
         const autoAcceptTimeoutMs = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
         const autoAcceptNeverAllowPatterns = getSetting(settings, "bashConfirm.autoAccept.neverAllowPatterns", []) as string[];
+        const autoAcceptSessionOverride = getAutoAcceptSessionOverride(ctx);
+        const autoAcceptEffective = autoAcceptSessionOverride
+          ? autoAcceptSessionOverride === "on"
+          : autoAcceptEnabledByConfig;
 
         ctx.ui.notify(`bash-confirm: enabled=${enabled}, debug=${debugEnabled}`, "info");
         ctx.ui.notify(`notifications: enabled=${notifyEnabled}, onShown=${onShown}, onBlocked=${onBlocked}, onModified=${onModified}`, "info");
@@ -1735,7 +1771,11 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`safeCommands: [${safeCommands.join(", ") || "(none)"}]`, "info");
         ctx.ui.notify(`blockedCommands: [${blockedCommands.join(", ") || "(none)"}]`, "info");
         ctx.ui.notify(
-          `autoAccept: enabled=${autoAcceptEnabled}, model=${autoAcceptModel || "(current model)"}, timeoutMs=${autoAcceptTimeoutMs}`,
+          `autoAccept: configEnabled=${autoAcceptEnabledByConfig}, effectiveEnabled=${autoAcceptEffective}, model=${autoAcceptModel || "(current model)"}, timeoutMs=${autoAcceptTimeoutMs}`,
+          "info",
+        );
+        ctx.ui.notify(
+          `autoAccept.sessionOverride: ${autoAcceptSessionOverride || "(none)"}`,
           "info",
         );
         ctx.ui.notify(
@@ -1773,19 +1813,58 @@ export default function (pi: ExtensionAPI) {
 
       if (cmd === "auto-accept" || cmd.startsWith("auto-accept ")) {
         const autoArgs = cmd.slice("auto-accept".length).trim();
-        const autoEnabled = getSetting(settings, "bashConfirm.autoAccept.enabled", false);
+        const autoEnabledByConfig = getSetting(settings, "bashConfirm.autoAccept.enabled", false);
         const autoModel = getSetting(settings, "bashConfirm.autoAccept.model", "");
         const autoTimeoutMs = getSetting(settings, "bashConfirm.autoAccept.timeoutMs", 5000);
         const autoNeverAllowPatterns = getSetting(settings, "bashConfirm.autoAccept.neverAllowPatterns", []) as string[];
+        const autoSessionOverride = getAutoAcceptSessionOverride(ctx);
+        const autoEffectiveEnabled = autoSessionOverride ? autoSessionOverride === "on" : autoEnabledByConfig;
 
         if (!autoArgs || autoArgs === "status") {
-          ctx.ui.notify(`auto-accept enabled: ${autoEnabled}`, "info");
+          ctx.ui.notify(`auto-accept config enabled: ${autoEnabledByConfig}`, "info");
+          ctx.ui.notify(`auto-accept effective enabled: ${autoEffectiveEnabled}`, "info");
+          ctx.ui.notify(`auto-accept session override: ${autoSessionOverride || "(none)"}`, "info");
           ctx.ui.notify(`auto-accept model: ${autoModel || "(current model)"}`, "info");
           ctx.ui.notify(`auto-accept timeoutMs: ${autoTimeoutMs}`, "info");
           ctx.ui.notify(
             `auto-accept neverAllowPatterns: [${autoNeverAllowPatterns.join(", ") || "(none)"}]`,
             "info",
           );
+          return;
+        }
+
+        if (autoArgs === "session" || autoArgs.startsWith("session ")) {
+          const sessionArgs = autoArgs.slice("session".length).trim().toLowerCase();
+
+          if (!sessionArgs || sessionArgs === "status") {
+            const override = getAutoAcceptSessionOverride(ctx);
+            const effective = override ? override === "on" : autoEnabledByConfig;
+            ctx.ui.notify(`auto-accept session override: ${override || "(none)"}`, "info");
+            ctx.ui.notify(`auto-accept effective enabled: ${effective}`, "info");
+            return;
+          }
+
+          if (sessionArgs === "on") {
+            setAutoAcceptSessionOverride(ctx, "on");
+            ctx.ui.notify("Set auto-accept session override: on", "success");
+            return;
+          }
+
+          if (sessionArgs === "off") {
+            setAutoAcceptSessionOverride(ctx, "off");
+            ctx.ui.notify("Set auto-accept session override: off", "success");
+            return;
+          }
+
+          if (sessionArgs === "clear" || sessionArgs === "reset" || sessionArgs === "default") {
+            clearAutoAcceptSessionOverride(ctx);
+            const effective = autoEnabledByConfig;
+            ctx.ui.notify("Cleared auto-accept session override", "success");
+            ctx.ui.notify(`auto-accept effective enabled: ${effective}`, "info");
+            return;
+          }
+
+          ctx.ui.notify("Usage: /bash-confirm auto-accept session [status|on|off|clear]", "info");
           return;
         }
 
@@ -1808,7 +1887,7 @@ export default function (pi: ExtensionAPI) {
           return;
         }
 
-        ctx.ui.notify("Usage: /bash-confirm auto-accept [status|test <command>]", "info");
+        ctx.ui.notify("Usage: /bash-confirm auto-accept [status|session [status|on|off|clear]|test <command>]", "info");
         return;
       }
 

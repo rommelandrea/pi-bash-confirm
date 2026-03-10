@@ -449,8 +449,10 @@ Example:
 
 Notes:
 - This mode is **optional** and off by default.
-- The model prompt is intentionally strict: default to `review` unless a command is clearly read-only.
+- The model prompt is conservative, but allows common check-only dev commands (for example `eslint` without `--fix`, `tsc --noEmit`, and lint/typecheck/test scripts).
+- Commands that mutate state (including fix/write flags, git history changes, install/publish/deploy, etc.) should fall back to manual review.
 - Use `autoAccept.neverAllowPatterns` to force manual review for command families you never want auto-approved.
+- You can override auto-accept for the current session with `/bash-confirm auto-accept session on|off|clear`.
 - Use a low-latency model to keep shell flow responsive.
 - The command text is sent to the configured model for evaluation.
 
@@ -510,7 +512,8 @@ rm -rf ./old-dir-backup
 |---------|-------------|
 | `/bash-confirm test-notify` | Send a test notification to verify Telegram setup |
 | `/bash-confirm debug` | Display current configuration status |
-| `/bash-confirm auto-accept` | Show auto-accept status (enabled/model/timeout) |
+| `/bash-confirm auto-accept` | Show auto-accept status (config/effective/session override/model/timeout) |
+| `/bash-confirm auto-accept session [status\|on\|off\|clear]` | Manage auto-accept override for the current session only |
 | `/bash-confirm auto-accept test <command>` | Test auto-accept decision for a command without executing it |
 | `/bash-confirm suggest-generalize` | Ask AI to recommend whitelist generalizations |
 | `/bash-confirm whitelist list` | Show all whitelist entries |
