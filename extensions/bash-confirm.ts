@@ -57,6 +57,16 @@ function deepMerge(base: JsonObject, overrides: JsonObject): JsonObject {
 
     if (isPlainObject(baseValue) && isPlainObject(overrideValue)) {
       result[key] = deepMerge(baseValue, overrideValue);
+    } else if (Array.isArray(baseValue) && Array.isArray(overrideValue)) {
+      const seen = new Set(baseValue);
+      const merged = [...baseValue];
+      for (const item of overrideValue) {
+        if (!seen.has(item)) {
+          merged.push(item);
+          seen.add(item);
+        }
+      }
+      result[key] = merged;
     } else {
       result[key] = overrideValue;
     }
